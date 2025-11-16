@@ -1,0 +1,506 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="An immersive reading experience that displays text segment by segment, automatically generating a unique, atmospheric background image for each page to enhance the mood." />
+    <title>慢讀5.0</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/opencc-js@1.0.5/dist/umd/full.js"></script>
+    <style>
+        /* To ensure Noto Serif TC is loaded for traditional chinese characters */
+        @import url('https://fonts.googleapis.com/css2?family=Noto+Serif+TC:wght@400;700&display=swap');
+        body {
+            font-family: 'Noto Serif TC', serif;
+        }
+    </style>
+<script type="importmap">
+{
+  "imports": {
+    "@google/genai": "https://aistudiocdn.com/@google/genai@^1.29.1",
+    "react": "https://aistudiocdn.com/react@^19.2.0",
+    "react-dom/client": "https://aistudiocdn.com/react-dom@^19.2.0/client"
+  }
+}
+</script>
+</head>
+<body class="bg-[#f4f1ea]">
+    <div id="root"></div>
+    <script type="module">
+        import React, { useState, useCallback, useEffect, useMemo } from 'react';
+        import ReactDOM from 'react-dom/client';
+        import { GoogleGenAI, Modality } from "@google/genai";
+
+        // --- Gemini Service ---
+        const API_KEY = process.env.API_KEY;
+        if (!API_KEY) {
+          console.warn("API_KEY environment variable not set. The application may not function correctly.");
+        }
+        const ai = new GoogleGenAI({ apiKey: API_KEY });
+
+        /**
+         * Generates an image based on a text prompt using Gemini.
+         * @param prompt - The text to generate an image from.
+         * @returns A base64 encoded image string (e.g., data:image/png;base64,...).
+         */
+        const generateImage = async (prompt) => {
+          if (!prompt || prompt.trim().length < 5) {
+            return null;
+          }
+          
+          const imagePrompt = `An atmospheric, artistic, and evocative image representing this idea: "${prompt}". Rendered in a classic manga style with an emphasis on simplicity. Use only black and white, with clean, uniform, and minimalist line art. The overall feel should be a high-contrast, clear monochrome comic panel or sketch. IMPORTANT: The generated image must not contain any text, letters, or words whatsoever.`;
+
+          try {
+            const response = await ai.models.generateContent({
+              model: 'gemini-2.5-flash-image',
+              contents: {
+                parts: [{ text: imagePrompt }],
+              },
+              config: {
+                responseModalities: [Modality.IMAGE],
+              },
+            });
+
+            for (const part of response.candidates?.[0]?.content?.parts || []) {
+              if (part.inlineData) {
+                const base64ImageBytes = part.inlineData.data;
+                return `data:${part.inlineData.mimeType};base64,${base64ImageBytes}`;
+              }
+            }
+            return null;
+          } catch (error) {
+            console.error("Error generating image with Gemini:", error);
+            return null;
+          }
+        };
+
+
+        // --- Icon Components ---
+        const PrevIcon = () => React.createElement('svg', { viewBox: "0 0 24 24", className: "w-6 h-6" },
+            React.createElement('path', { d: "M15.41 7.41L14 6l-6 6 6 6 1.41-1.41L10.83 12z" })
+        );
+        const NextIcon = () => React.createElement('svg', { viewBox: "0 0 24 24", className: "w-6 h-6" },
+            React.createElement('path', { d: "M8.59 16.59L10 18l6-6-6-6-1.41 1.41L13.17 12z" })
+        );
+        const PauseIcon = () => React.createElement('svg', { viewBox: "0 0 24 24", className: "w-6 h-6" },
+            React.createElement('path', { d: "M6 19h4V5H6v14zm8-14v14h4V5h-4z" })
+        );
+        const PlayIcon = () => React.createElement('svg', { viewBox: "0 0 24 24", className: "w-6 h-6" },
+            React.createElement('path', { d: "M8 5v14l11-7z" })
+        );
+        const PlusIcon = () => React.createElement('svg', { viewBox: "0 0 24 24", className: "w-6 h-6" },
+            React.createElement('path', { d: "M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z" })
+        );
+        const MinusIcon = () => React.createElement('svg', { viewBox: "0 0 24 24", className: "w-6 h-6" },
+            React.createElement('path', { d: "M19 13H5v-2h14v2z" })
+        );
+        const TrashIcon = () => React.createElement('svg', { viewBox: "0 0 24 24", className: "w-5 h-5", fill: "currentColor" },
+            React.createElement('path', { d: "M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z" })
+        );
+
+        // --- HistoryView Component ---
+        const HistoryView = ({ history, onLoad, onDelete, onClear }) => {
+            if (!history || history.length === 0) {
+                return React.createElement('div', { className: "mt-8 text-center text-gray-500" }, '暫無紀錄');
+            }
+            return React.createElement('div', { className: "w-full mt-10" },
+                React.createElement('div', { className: 'flex justify-between items-center mb-4'},
+                  React.createElement('h2', { className: "text-2xl font-bold text-[#4a7c85]" }, '閱讀紀錄'),
+                  React.createElement('button', {
+                    onClick: onClear,
+                    className: "text-sm text-gray-500 hover:text-red-500 transition-colors"
+                  }, '清除全部')
+                ),
+                React.createElement('div', { className: "max-h-48 overflow-y-auto bg-white/50 p-2 rounded-lg border border-gray-200" },
+                    history.map(item =>
+                        React.createElement('div', {
+                            key: item.id,
+                            className: "flex items-center justify-between p-3 mb-2 rounded-md hover:bg-white/90 transition-colors"
+                        },
+                            React.createElement('div', { className: "flex-1 cursor-pointer min-w-0", onClick: () => onLoad(item.text) },
+                                React.createElement('p', { className: "font-semibold truncate", title: item.text }, item.title),
+                                React.createElement('p', { className: "text-xs text-gray-500" }, new Date(item.timestamp).toLocaleString())
+                            ),
+                            React.createElement('button', {
+                                onClick: () => onDelete(item.id),
+                                className: "ml-4 p-2 text-gray-400 hover:text-red-600 rounded-full transition-colors",
+                                title: "刪除"
+                            }, React.createElement(TrashIcon))
+                        )
+                    )
+                )
+            );
+        };
+        
+        // --- EndView Component ---
+        const EndView = ({ onRestart, onHome }) => {
+            return React.createElement('div', { className: "flex flex-col items-center justify-center text-center p-8 text-[#3a3a3a]" },
+                React.createElement('h1', { className: "text-5xl font-bold mb-4 text-[#4a7c85]" }, '閱讀完畢'),
+                React.createElement('p', { className: "text-lg text-gray-600 mb-10" }, '希望您享受這次的沉浸式閱讀體驗。'),
+                React.createElement('div', { className: "flex space-x-6" },
+                    React.createElement('button', {
+                        onClick: onRestart,
+                        className: "py-3 px-8 text-base bg-transparent text-[#3a3a3a] border-2 border-[#3a3a3a] rounded-full cursor-pointer transition-all duration-300 hover:bg-[#3a3a3a] hover:text-white hover:shadow-lg transform hover:-translate-y-1"
+                    }, '重新閱讀'),
+                    React.createElement('button', {
+                        onClick: onHome,
+                        className: "py-3 px-8 text-base bg-[#3a3a3a] text-[#f4f1ea] border-none rounded-full cursor-pointer transition-all duration-300 hover:bg-[#4a7c85] hover:shadow-lg transform hover:-translate-y-1"
+                    }, '返回主頁')
+                )
+            );
+        };
+        
+
+        // --- SettingsView Component ---
+        const SettingsView = ({ onStart, isLoading, text, onTextChange, interval, onIntervalChange, history, onLoadHistory, onDeleteHistory, onClearHistory }) => {
+          const handleStart = () => {
+            if (text.trim() === '') {
+              alert('請輸入文字內容');
+              return;
+            }
+            onStart();
+          };
+
+          return (
+            React.createElement('div', { className: "flex flex-col items-center p-8 box-border w-full max-w-2xl text-[#3a3a3a]" },
+              React.createElement('h1', { className: "text-4xl font-bold mb-6 text-[#4a7c85]" }, '慢讀'),
+              React.createElement('p', { className: "text-center mb-8 text-gray-600" }, '貼上您的文章，我們將為每一頁生成獨特的背景，', React.createElement('br'), '讓您的閱讀體驗更加沉浸。'),
+              React.createElement('textarea', {
+                id: "text-input",
+                className: "w-full h-52 p-4 border border-[#a9a9a9] rounded-lg bg-white/80 text-base resize-none mb-6 focus:ring-2 focus:ring-[#4a7c85] focus:border-transparent outline-none transition shadow-sm",
+                placeholder: "在此貼上您的文字...",
+                value: text,
+                onChange: (e) => onTextChange(e.target.value)
+              }),
+              React.createElement('div', { className: "flex items-center mb-8" },
+                React.createElement('span', null, '每'),
+                React.createElement('input', {
+                  type: "number",
+                  id: "timer-input",
+                  className: "w-16 p-2 text-center border border-[#a9a9a9] rounded-md mx-4 focus:ring-2 focus:ring-[#4a7c85] focus:border-transparent outline-none",
+                  value: interval,
+                  onChange: (e) => onIntervalChange(parseInt(e.target.value, 10)),
+                  min: "4"
+                }),
+                React.createElement('span', null, '秒翻頁')
+              ),
+              React.createElement('button', {
+                id: "start-button",
+                className: "py-3 px-8 text-base bg-[#3a3a3a] text-[#f4f1ea] border-none rounded-full cursor-pointer transition-all duration-300 hover:bg-[#4a7c85] hover:shadow-lg transform hover:-translate-y-1 disabled:bg-gray-400 disabled:cursor-not-allowed disabled:transform-none",
+                onClick: handleStart,
+                disabled: isLoading
+              }, isLoading ? '生成首頁圖片中...' : '開始閱讀'),
+              React.createElement(HistoryView, { 
+                  history: history, 
+                  onLoad: onLoadHistory, 
+                  onDelete: onDeleteHistory, 
+                  onClear: onClearHistory 
+              })
+            )
+          );
+        };
+
+        // --- ReaderView Component ---
+        const fontSizes = ['text-xl', 'text-2xl', 'text-3xl', 'text-4xl'];
+        const ReaderView = ({ segments, interval, initialImages, onFinish }) => {
+          const [currentIndex, setCurrentIndex] = useState(0);
+          const [isPlaying, setIsPlaying] = useState(true);
+          const [isFading, setIsFading] = useState(false);
+          const [fontSizeIndex, setFontSizeIndex] = useState(1);
+          const [imageUrls, setImageUrls] = useState(initialImages);
+          const [isImageLoading, setIsImageLoading] = useState(false);
+
+          const totalSegments = segments.length;
+          const progress = totalSegments > 0 ? ((currentIndex + 1) / totalSegments) * 100 : 0;
+          const currentImageGroup = useMemo(() => Math.floor(currentIndex / 2), [currentIndex]);
+
+          useEffect(() => {
+            const fetchCurrentImageIfNeeded = async () => {
+              if (imageUrls.has(currentImageGroup)) {
+                setIsImageLoading(false);
+                return;
+              }
+              setIsImageLoading(true);
+              const firstSegmentIndex = currentImageGroup * 2;
+              const secondSegmentIndex = firstSegmentIndex + 1;
+              const firstSegment = segments[firstSegmentIndex];
+              const secondSegment = segments.length > secondSegmentIndex ? segments[secondSegmentIndex] : null;
+              if (!firstSegment) {
+                setIsImageLoading(false);
+                return;
+              }
+              const prompt = firstSegment.text + (secondSegment ? ` ${secondSegment.text}` : '');
+              const imageUrl = await generateImage(prompt);
+              setImageUrls(prev => new Map(prev).set(currentImageGroup, imageUrl));
+              setIsImageLoading(false);
+            };
+            fetchCurrentImageIfNeeded();
+          }, [currentImageGroup, segments, imageUrls]);
+
+          useEffect(() => {
+            const totalImageGroups = Math.ceil(segments.length / 2);
+            const preloadImageGroup = async (groupIndex) => {
+              if (groupIndex >= totalImageGroups || imageUrls.has(groupIndex)) return;
+              const firstSegmentIndex = groupIndex * 2;
+              const secondSegmentIndex = firstSegmentIndex + 1;
+              const firstSegment = segments[firstSegmentIndex];
+              const secondSegment = segments.length > secondSegmentIndex ? segments[secondSegmentIndex] : null;
+              if (!firstSegment) return;
+              const prompt = firstSegment.text + (secondSegment ? ` ${secondSegment.text}` : '');
+              const imageUrl = await generateImage(prompt);
+              setImageUrls(prev => {
+                if (!prev.has(groupIndex)) {
+                  return new Map(prev).set(groupIndex, imageUrl);
+                }
+                return prev;
+              });
+            };
+            preloadImageGroup(currentImageGroup + 1);
+            preloadImageGroup(currentImageGroup + 2);
+          }, [currentImageGroup, segments, imageUrls]);
+
+          const updateSegment = useCallback((newIndex) => {
+            if (newIndex >= 0 && newIndex < totalSegments) {
+              setIsFading(true);
+              setTimeout(() => {
+                setCurrentIndex(newIndex);
+                setIsFading(false);
+              }, 500);
+            } else if (newIndex >= totalSegments) {
+                onFinish();
+            }
+          }, [totalSegments, onFinish]);
+
+          const goToNextSegment = useCallback(() => {
+            updateSegment(currentIndex + 1);
+          }, [currentIndex, updateSegment]);
+
+          const goToPrevSegment = useCallback(() => {
+            if (currentIndex > 0) updateSegment(currentIndex - 1);
+          }, [currentIndex, updateSegment]);
+
+          useEffect(() => {
+            if (totalSegments <= 0) return;
+            const autoPageTurn = setInterval(() => {
+              if (isPlaying) goToNextSegment();
+            }, interval * 1000);
+            return () => clearInterval(autoPageTurn);
+          }, [isPlaying, goToNextSegment, interval, totalSegments]);
+
+          const handleIncreaseFontSize = useCallback(() => setFontSizeIndex(p => Math.min(p + 1, fontSizes.length - 1)), []);
+          const handleDecreaseFontSize = useCallback(() => setFontSizeIndex(p => Math.max(p - 1, 0)), []);
+
+          const currentSegment = segments[currentIndex];
+          const currentImageUrl = imageUrls.get(currentImageGroup);
+
+          return React.createElement('div', { className: "flex flex-col h-screen w-screen bg-[#f4f1ea]" },
+            React.createElement('div', { className: "fixed top-0 left-0 w-full z-20" },
+              React.createElement('div', { id: "progress-bar", className: "h-2 bg-[#4a7c85] transition-all duration-400 ease-out", style: { width: `${progress}%` } }),
+              React.createElement('span', { className: "absolute top-3 right-4 text-sm font-bold text-[#4a7c85] font-sans" }, `${Math.round(progress)}%`)
+            ),
+            React.createElement('div', { className: "flex-1 flex flex-col justify-center items-center pt-8 px-4 md:px-8 text-center text-[#3a3a3a]" },
+              React.createElement('div', { id: "display-wrapper", className: `transition-opacity duration-500 ease-in-out w-full max-w-3xl ${isFading ? 'opacity-0' : 'opacity-100'}` },
+                React.createElement('div', { id: "paragraph-number", className: "text-xl font-bold text-[#8a7968] h-10 leading-10 mb-4" }, currentSegment?.paraNumber || ''),
+                React.createElement('div', { id: "text-display", className: `leading-relaxed text-left min-h-[12rem] ${fontSizes[fontSizeIndex]}` }, currentSegment?.text || '')
+              )
+            ),
+            React.createElement('div', { className: "w-full flex justify-center items-center py-2 relative" },
+              React.createElement('div', { className: "flex" },
+                React.createElement('button', { className: "control-button p-4 mx-5 fill-[#a9a9a9] hover:fill-[#3a3a3a] transition-colors", title: "上一頁", onClick: goToPrevSegment }, React.createElement(PrevIcon)),
+                React.createElement('button', { className: "control-button p-4 mx-5 fill-[#a9a9a9] hover:fill-[#3a3a3a] transition-colors", title: isPlaying ? "暫停" : "播放", onClick: () => setIsPlaying(p => !p) }, isPlaying ? React.createElement(PauseIcon) : React.createElement(PlayIcon)),
+                React.createElement('button', { className: "control-button p-4 mx-5 fill-[#a9a9a9] hover:fill-[#3a3a3a] transition-colors", title: "下一頁", onClick: goToNextSegment }, React.createElement(NextIcon))
+              ),
+              React.createElement('div', { className: "absolute right-8 flex items-center" },
+                React.createElement('button', { className: "control-button p-3 fill-[#a9a9a9] hover:fill-[#3a3a3a] transition-colors", title: "縮小字體", onClick: handleDecreaseFontSize }, React.createElement(MinusIcon)),
+                React.createElement('button', { className: "control-button p-3 fill-[#a9a9a9] hover:fill-[#3a3a3a] transition-colors", title: "放大字體", onClick: handleIncreaseFontSize }, React.createElement(PlusIcon))
+              )
+            ),
+            React.createElement('div', { className: "w-full h-[45vh] bg-gray-300 relative" },
+              isImageLoading ? React.createElement('div', { className: "w-full h-full flex items-center justify-center bg-gray-200" }, React.createElement('div', { className: "animate-spin rounded-full h-12 w-12 border-b-2 border-[#4a7c85]" })) :
+              currentImageUrl ? React.createElement('img', { src: currentImageUrl, alt: "Generated background", className: "w-full h-full object-cover" }) :
+              React.createElement('div', { className: "w-full h-full flex items-center justify-center bg-gray-200" }, React.createElement('p', { className: "text-gray-500" }, '無法生成圖片'))
+            )
+          );
+        };
+
+        // --- App Component ---
+        const App = () => {
+          const [view, setView] = useState('settings');
+          const [textSegments, setTextSegments] = useState([]);
+          const [pageTurnInterval, setPageTurnInterval] = useState(7);
+          const [isInitiallyLoading, setIsInitiallyLoading] = useState(false);
+          const [initialImages, setInitialImages] = useState(new Map());
+          const [currentText, setCurrentText] = useState('');
+          
+          const [settingsText, setSettingsText] = useState('');
+          const [settingsInterval, setSettingsInterval] = useState(7);
+          
+          const [history, setHistory] = useState(() => {
+              try {
+                  const savedHistory = localStorage.getItem('readingHistory');
+                  return savedHistory ? JSON.parse(savedHistory) : [];
+              } catch (error) {
+                  console.error("Could not load history from localStorage", error);
+                  return [];
+              }
+          });
+
+          useEffect(() => {
+              try {
+                  localStorage.setItem('readingHistory', JSON.stringify(history));
+              } catch (error) {
+                  console.error("Could not save history to localStorage", error);
+              }
+          }, [history]);
+
+
+          const processAndSegmentText = useCallback((rawText) => {
+            if (typeof OpenCC === 'undefined') {
+              alert("Text processing library not loaded. Please check your internet connection and refresh.");
+              return null;
+            }
+            const toTraditional = OpenCC.Converter({ from: 'cn', to: 'twp' });
+            const traditionalText = toTraditional(rawText);
+            const correctedText = traditionalText.replace(/“/g, '「').replace(/”/g, '」');
+            const textWithMarkers = '__NEW_PARA__' + correctedText.replace(/\\n\\s*/g, '__NEW_PARA__');
+            const regex = /(?<=[。？！。」])|(?=__NEW_PARA__)/g;
+            const rawSegments = textWithMarkers.split(regex).filter(segment => segment && segment.trim() !== '');
+
+            let processedSegments = [];
+            for (const segment of rawSegments) {
+              if (processedSegments.length > 0 && /^\\s*[」”’』]\\s*$/.test(segment) && !segment.includes('__NEW_PARA__')) {
+                processedSegments[processedSegments.length - 1].text += segment;
+              } else {
+                const isNew = segment.startsWith('__NEW_PARA__');
+                const cleanText = isNew ? segment.substring('__NEW_PARA__'.length) : segment;
+                if (cleanText.trim().length > 0) {
+                  processedSegments.push({ text: cleanText, isNewPara: isNew });
+                }
+              }
+            }
+
+            let paragraphCounter = 0;
+            const finalSegments = processedSegments.map((segment) => {
+              if (segment.isNewPara) paragraphCounter++;
+              return { ...segment, paraNumber: segment.isNewPara ? paragraphCounter : null };
+            }).filter(s => s.text.trim() !== '');
+
+            if (finalSegments.length > 0 && finalSegments[0].paraNumber === null) {
+              finalSegments[0].isNewPara = true;
+              finalSegments[0].paraNumber = 1;
+              let currentParaNum = 1;
+              for (let i = 1; i < finalSegments.length; i++) {
+                if (finalSegments[i].isNewPara) {
+                  currentParaNum++;
+                  finalSegments[i].paraNumber = currentParaNum;
+                }
+              }
+            }
+            return finalSegments;
+          }, []);
+
+          const handleStartReading = async (text, interval) => {
+            const segments = processAndSegmentText(text);
+            if (!segments || segments.length === 0) {
+              alert("無法處理文字或文字為空。");
+              return;
+            }
+            
+            setHistory(prevHistory => [{
+                id: Date.now(),
+                title: text.substring(0, 40) + (text.length > 40 ? '...' : ''),
+                text: text,
+                timestamp: Date.now()
+            }, ...prevHistory.filter(item => item.text !== text)]);
+
+            setIsInitiallyLoading(true);
+            setCurrentText(text);
+            try {
+              const firstSegment = segments[0];
+              const secondSegment = segments.length > 1 ? segments[1] : null;
+              const prompt = firstSegment.text + (secondSegment ? ` ${secondSegment.text}` : '');
+              const firstImageUrl = await generateImage(prompt);
+              const imageMap = new Map();
+              imageMap.set(0, firstImageUrl);
+              setTextSegments(segments);
+              setPageTurnInterval(interval < 4 ? 4 : interval);
+              setInitialImages(imageMap);
+              setView('reader');
+            } catch (error) {
+              console.error("Failed to generate initial image:", error);
+              alert("無法生成初始圖片，請稍後再試。");
+            } finally {
+              setIsInitiallyLoading(false);
+            }
+          };
+          
+          const handleReadingFinish = () => setView('end');
+          
+          const handleRestart = () => {
+              handleStartReading(currentText, pageTurnInterval);
+          };
+          
+          const handleGoHome = () => {
+              setTextSegments([]);
+              setInitialImages(new Map());
+              setCurrentText('');
+              setView('settings');
+          };
+          
+          const handleLoadHistory = (text) => setSettingsText(text);
+          const handleDeleteHistory = (id) => setHistory(prev => prev.filter(item => item.id !== id));
+          const handleClearHistory = () => {
+              if (window.confirm('確定要清除所有閱讀紀錄嗎？')) {
+                  setHistory([]);
+              }
+          };
+          
+          const renderView = () => {
+              switch(view) {
+                  case 'reader':
+                      return React.createElement(ReaderView, { 
+                          segments: textSegments, 
+                          interval: pageTurnInterval, 
+                          initialImages: initialImages,
+                          onFinish: handleReadingFinish
+                      });
+                  case 'end':
+                      return React.createElement(EndView, {
+                          onRestart: handleRestart,
+                          onHome: handleGoHome
+                      });
+                  case 'settings':
+                  default:
+                      return React.createElement(SettingsView, { 
+                          onStart: () => handleStartReading(settingsText, settingsInterval), 
+                          isLoading: isInitiallyLoading,
+                          text: settingsText,
+                          onTextChange: setSettingsText,
+                          interval: settingsInterval,
+                          onIntervalChange: setSettingsInterval,
+                          history: history,
+                          onLoadHistory: handleLoadHistory,
+                          onDeleteHistory: handleDeleteHistory,
+                          onClearHistory: handleClearHistory
+                      });
+              }
+          };
+
+          return (
+            React.createElement('div', { className: "flex justify-center items-center h-screen w-screen overflow-hidden box-border transition-colors duration-500 ease" },
+              renderView()
+            )
+          );
+        };
+
+        // --- Mount Application ---
+        const rootElement = document.getElementById('root');
+        if (!rootElement) {
+          throw new Error("Could not find root element to mount to");
+        }
+        const root = ReactDOM.createRoot(rootElement);
+        root.render(React.createElement(React.StrictMode, null, React.createElement(App)));
+    </script>
+</body>
+</html>
